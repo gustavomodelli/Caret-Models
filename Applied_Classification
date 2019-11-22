@@ -1,0 +1,111 @@
+library(tidyverse)
+library(caret)
+library(AppliedPredictiveModeling)
+library(C50) ##data Churn
+library(Amelia)
+library(corrplot)
+library(rpart)
+library(pROC)
+
+##Processamento Paralelo
+##Aumentar a Velocidade
+library(doParallel)
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+
+data(churn)
+str(churnTrain)
+
+missmap(churnTrain)
+##no missing values
+
+ncol(churnTrain)
+
+ggplot(data = churnTrain)+
+  geom_density(aes(x = total_day_minutes, fill = churn))
+
+ggplot(data = churnTrain)+
+  geom_density(aes(x = total_day_calls, fill = churn))
+
+ggplot(data = churnTrain)+
+  geom_density(aes(x = total_eve_minutes, fill = churn))
+
+ggplot(data = churnTrain)+
+  geom_density(aes(x = total_eve_charge, fill = churn))
+
+##correlações
+varNumeric <- select_if(churnTrain[,-20], is.numeric)
+cor(varNumeric)
+corrplot(cor(varNumeric), method = 'color', type = 'upper')
+dim(varNumeric)
+
+##Modelo basico
+model_rp <- rpart(churn ~ . , data = churnTrain)
+rpart.plot::rpart.plot(model_rp)
+
+set.seed(852)
+fit_control <- trainControl(## 10-fold CV
+               method = "cv",
+               number = 10,
+               summaryFunction = twoClassSummary,
+               classProbs = TRUE,
+               allowParallel = TRUE)
+
+##Rpart
+set.seed(669)
+rpartModel <- train(churn ~ .,
+                    data = churnTrain,
+                    method = "rpart",
+                    tuneLength = 30,
+                    metric = 'ROC',
+                    trControl = fit_control)
+
+predito <- predict(rpartModel, churnTest)
+confusionMatrix(predito, churnTest$churn)
+
+preditoprob <- predict(rpartModel, churnTest, type = 'prob')
+curva <- roc(churnTest$churn, preditoprob[,'yes'])
+plot.roc(curva)
+curva
+
+##RandomForest
+rfModel <- train(churn ~ .,
+                 data = churnTrain,
+                 method = "rf",
+                 tuneLength = 10,
+                 ntrees = 1000,
+                 importance = TRUE,
+                 trControl = fit_control)
+
+predito <- predict(rfModel, churnTest)
+confusionMatrix(predito, churnTest$churn)
+##Logistic regression
+set.seed(476)
+lrFull <- train(churn ~ .,
+                data = churnTrain,
+                  method = "glm",
+                  metric = "ROC",
+                  trControl = fit_control,
+                  preProc = c('center','scale'))
+
+
+##Cubist
+cubistGrid <- expand.grid(committees = c(1, 5, 10, 50, 75, 100),
+                          neighbors = c(0, 1, 3, 5, 7, 9))
+
+#3Cubist
+set.seed(669)
+cbModel <- train(churn ~ .,
+                 data = churnTrain,
+                 method = "cubist",
+                 tuneGrid = cubistGrid,
+                 trControl = fit_control)
+##Ressamples
+allResamples <- resamples(list("Logistic" = lrFull,
+                               "rpart" = rpartModel,
+                               "random forest" = rfModel))
+summary(allResamples)                          
+## Plot the RMSE values
+parallelplot(allResamples)                          
+
