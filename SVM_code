@@ -1,0 +1,36 @@
+library(caret)
+library(e1071)
+
+alunos <- read.csv2('alunos.csv')
+str(alunos)
+
+alunos$Sexo <- factor(alunos$Sexo)
+alunos$Curso <- factor(alunos$Curso)
+
+##SVM library e1071 
+##kernel: linar, radial
+modelSVM <- svm(Conhecimeto ~ . , data = alunos, kernel = 'linear',
+                cost = 10)
+
+
+modelSVM <- svm(Conhecimeto ~ . , data = alunos, kernel = 'radial',
+                cost = 1, gamma = 0.5)
+
+summary(modelSVM)
+predito <- predict(modelSVM, alunos)
+cor(predito, alunos$Conhecimeto)
+
+
+##tunning automático
+set.seed(2002)
+alunos_radial_tune <- tune(svm, Conhecimeto ~ . , data = alunos, kernel = 'radial',
+                           ranges = list(cost = c(0.01, 0.1, 1, 10, 100),
+                           gamma = c(0.01, 0.05, 0.1, 0.5, 1)))
+alunos_radial_tune
+plot(alunos_radial_tune)
+
+## tune `rpart' for regression, using 10-fold cross validation (default)
+data(mtcars)
+obj3 <- tune.rpart(mpg~., data = mtcars, minsplit = c(5,10,15))
+summary(obj3)
+plot(obj3)
