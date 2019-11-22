@@ -1,0 +1,67 @@
+library(tidyverse)
+library(caret)
+library(pROC)
+library(AppliedPredictiveModeling)
+
+##Processamento Paralelo
+##Aumentar a Velocidade
+library(doParallel)
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+data(AlzheimerDisease)
+
+dim(predictors)
+
+alzheimer <- predictors
+alzheimer$diagnosis <- diagnosis
+
+predictors$E2 <- predictors$E3 <- predictors$E4 <- 0
+predictors$E2[grepl("2", predictors$Genotype)] <- 1
+predictors$E3[grepl("3", predictors$Genotype)] <- 1
+predictors$E4[grepl("4", predictors$Genotype)] <- 1
+
+## Split the data using stratified sampling
+set.seed(730)
+split <- createDataPartition(diagnosis, p = .8, list = FALSE)
+## Combine into one data frame
+adData <- predictors
+adData$Class <- diagnosis
+training <- adData[ split,]
+testing <- adData[-split, ]
+## Save a vector of predictor variable names
+predVars <- names(adData)[!(names(adData) %in% c("Class", "Genotype"))]
+
+## Compute the area under the ROC curve, sensitivity, specificity,
+## accuracy and Kappa
+
+fiveStats <- function(...) c(twoClassSummary(...),
+                                 + defaultSummary(...))
+
+##Create resampling data sets to use for all models
+set.seed(104)
+index <- createMultiFolds(training$Class, times = 5)
+## Create a vector of subset sizes to evaluate
+varSeq <- seq(1, length(predVars)-1, by = 2)
+
+
+##rfe com Random Forest
+## The control function is similar to trainControl():
+##rfFuncs == randoForest; 
+newRF <- rfFuncs
+ctrl <- rfeControl(method = "repeatedcv",
+                     repeats = 5,
+                     verbose = TRUE,
+                     index = index,
+                     functions = newRF,
+                     allowParallel = TRUE)
+
+set.seed(721)
+rfRFE <- rfe(x = training[, predVars],
+             y = training$Class,
+             sizes = varSeq,
+             metric = "ROC",
+             rfeControl = ctrl,
+             ## now pass options to randomForest()
+             ntree = 1000)
+rfRFE
