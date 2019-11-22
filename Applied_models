@@ -1,0 +1,388 @@
+library(tidyverse)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(corrplot)
+library(MASS)
+library(broom)
+library(mgcv)
+library(pROC)
+library(AppliedPredictiveModeling)
+library(randomForest)
+
+data("GermanCredit")
+str(GermanCredit)
+
+##partição
+inTrain <- createDataPartition(y = GermanCredit$Class, p = .70, list = FALSE)
+germam.train <- GermanCredit[inTrain,]
+germam.test <- GermanCredit[-inTrain,]
+
+set.seed(8484)
+trainControl <- trainControl(method = 'repeatedcv',
+                             repeats = 5)
+
+svmfit <- train(Class ~ . , data = germam.train,
+                method = 'svmRadial',
+                preProcess = c('center','scale','nzv'),
+                tuneLenght = 10,
+                trControl = trainControl)
+                
+plot(svmfit)
+svmfit
+preditor <- predict(svmfit, germam.test, type = 'raw')
+confusionMatrix(preditor, germam.test$Class)
+
+##Importância da Variável
+var.import1 <- varImp(svmfit, scale = FALSE)
+var.import1
+plot(var.import1, top = 20)
+
+##Utilizando Logistic Regression
+logistic <- train(Class ~ . , data = germam.train,
+                method = 'glm',
+                preProcess = c('center','scale','nzv'),
+                trControl = trainControl)
+
+logistic
+##Importância da Variável
+var.import1 <- varImp(logistic, scale = FALSE)
+var.import1
+plot(var.import1, top = 20)
+
+preditor <- predict(logistic, germam.test, type = 'raw')
+confusionMatrix(preditor, germam.test$Class)
+
+##Comparação entre modelos
+resamp <- resamples(list(svm = svmfit, logistic = logistic))
+summary(resamp)
+
+##Logistic Boost
+logisticBoost <- train(Class ~ . , data = germam.train,
+                  method = 'LogitBoost',
+                  preProcess = c('center','scale','nzv'),
+                  trControl = trainControl)
+
+plot(logistic)
+preditor <- predict(logisticBoost, germam.test, type = 'raw')
+confusionMatrix(preditor, germam.test$Class)
+
+##Binarizando Dados
+data(mtcars)
+str(mtcars)
+
+cols <- c('vs','am','gear','carb')
+mtcars[cols] <- sapply(mtcars[cols], factor)
+
+binary <- dummyVars(~ vs + am + gear + carb, data = mtcars,
+                    levelsOnly = TRUE)
+mtcars.new <- data.frame(predict(binary, mtcars))
+
+##Observando quais tem relação com o desfecho
+control <- rfeControl(functions=rfFuncs, method="cv", number=10)
+selecao <- rfe(mtcars.new, mtcars[,1], rfeControl = control)
+selecao
+
+##Utilizar apenas as variaveis binarizadas com melhor desempenho
+
+mtcars.model <- mtcars %>%
+  select(mpg, cyl, disp, hp, drat, wt, qsec) %>%
+  mutate(
+    vs1 = mtcars.new$vs1, 
+    vs0 = mtcars.new$vs0,
+    carb4 = mtcars.new$carb4,
+    am0 = mtcars.new$am0
+  )
+
+
+##retirar as colineares
+descrCorr <- cor(mtcars.model[,-1])
+corrplot::corrplot(descrCorr, method = 'number', type = 'upper')
+highCorr <- findCorrelation(descrCorr, 0.90)
+
+mtcars.model <- mtcars.model[,-highCorr]
+mtcars.model$mpg <- mtcars$mpg
+
+##Modelo preditivo com GAM
+##Logistic Boost
+model_gam <- train(mpg ~ . , data = mtcars.model,
+                       method = 'glm',
+                       preProcess = c('center','scale','nzv'),
+                       trControl = trainControl)
+
+model_gam
+summary(model_gam)
+
+##Oil Datatbase
+data(oil)
+str(oilType)
+
+##predictor: fattyAcids
+##Target: oilType
+
+correl <- cor(fattyAcids)
+corrplot::corrplot(correl, method = 'number', type = 'upper')
+pairs(fattyAcids)
+##Retira variáveis muito correlatas
+findcorr <- findCorrelation(correl)
+
+fatty <- fattyAcids[,-findcorr]
+fatty$oiltype <- oilType
+str(fatty)
+fatty$oiltype <- factor(fatty$oiltype, levels = c('A','B','C','D','E','F','G'),
+                        labels = c('pupkins','sunflower','peanut','olive','soybean','rapeseed',
+                                   'corn'))
+
+plot_oil <- function(oil){ 
+ggplot(data = fatty)+
+  geom_boxplot(aes(x = oiltype, y = Stearic, fill = oiltype))
+} 
+
+plot_oil(fatty$Linolenic)
+
+##Árvore
+model_rp <- rpart(oiltype ~ . , data = fatty)
+rpart.plot(model_rp)
+
+##Data Tecator
+data(tecator)
+##imputs: absorp
+##output: endpoint
+
+str(absorp)
+str(endpoints)
+dim(absorp)
+dim(endpoints)
+colnames(endpoints) <- c('water','fat','protein')
+endpoints <- as.data.frame(endpoints)
+
+##Ver as correlações do preditores
+correl <- cor(absorp)
+corrplot(correl, method = 'number', type = 'upper')
+findcorr <- findCorrelation(correl, 0.9)
+findcorr
+
+##Muitas Variávies estao correlacinada então opor por usar PCA
+process.pca <- preProcess(as.data.frame(absorp), method = c('center','scale','pca'))
+absorp.pca <- predict(process.pca, as.data.frame(absorp))
+
+##Para o modelo linear é necessário uma matrix
+absorp.pca$fat <- endpoints$fat
+str(absorp.pca)
+
+##Plot
+ggplot(data = absorp.pca, aes(x = PC1, y = fat))+
+  geom_point()+
+  geom_smooth()
+
+ggplot(data = absorp.pca, aes(x = PC2, y = fat))+
+  geom_point()+
+  geom_smooth()
+
+model_lm <- lm(fat ~ . , data = absorp.pca)
+summary(model_lm)
+plot(model_lm)
+
+model_gam <- gam(fat ~ s(PC1) + s(PC2), data = absorp.pca)
+summary(model_gam)
+glance(model_gam)
+coef(model_gam)
+
+##Modelagem
+##partição
+inTrain <- createDataPartition(y = absorp.pca$fat, p = .70, list = FALSE)
+absorp.train <- absorp.pca[inTrain,]
+absorp.test <- absorp.pca[-inTrain,]
+
+##Modelo
+##Número de ressamples
+set.seed(852)
+fit_control <- trainControl(## 10-fold CV
+  method = "cv",
+  number = 10)
+
+##Modelo Randon Forest
+model_gam <- train(fat ~., data = absorp.train, method ='gam',
+                tunelenght = 10,
+                trControl = fit_control)
+summary(model_gam)
+predito <- predict(model_gam, absorp.test)
+RMSE(predito, absorp.test$fat)
+cor(predito, absorp.test$fat)
+
+##Model PLS
+model_pls <- train(fat ~., data = absorp.train, method ='pls',
+                   tunelenght = 10,
+                   trControl = fit_control)
+summary(model_pls)
+predito <- predict(model_pls, absorp.test)
+RMSE(predito, absorp.test$fat)
+cor(predito, absorp.test$fat)
+
+##Outro exercício
+data("permeability")
+permeability <- as.data.frame(permeability)
+fingerprints <- as.data.frame(fingerprints)
+
+pre_process <- preProcess(fingerprints, method = 'nzv')
+pre_process
+
+fingerprints.new <- predict(pre_process, fingerprints)
+
+##Partição
+fingerprints.new$permeability <- permeability
+
+inTrain <- createDataPartition(y = fingerprints.new$permeability, p = .70, list = FALSE)
+perm.train <- fingerprints.new[inTrain,]
+perm.test <- fingerprints.new[-inTrain,]
+
+##Modelo Random Forest
+rfModel <- randomForest(solTrainXTrans, solTrainY, importance = TRUE,
+                        ntree = 1000)
+
+
+##Número de ressamples
+set.seed(852)
+fit_control <- trainControl(## 10-fold CV
+  method = "cv",
+  number = 10)
+
+##Modelo Randon Forest
+model_pls <- train(permeability ~., data = perm.train, method ='pls',
+                   tunelenght = 10,
+                   trControl = fit_control,
+                   pre_process = c('center','scale','pca'))
+summary(model_pls)
+predito <- predict(model_pls, perm.test)
+RMSE(predito, perm.test$permeability)
+cor(predito, perm.test$permeability)
+
+##Testar SVMradial
+model_svradial <- train(permeability ~., data = perm.train, method ='svmRadial',
+                   tunelenght = 10,
+                   trControl = fit_control,
+                   pre_process = c('center','scale','pca'))
+
+summary(model_svradial)
+predito <- predict(model_svradial, perm.test)
+RMSE(predito, perm.test$permeability)
+cor(predito, perm.test$permeability)
+
+##NNet
+nnetGrid <- expand.grid(decay = c(0, 0.01, 0.1),
+                        size = c(1:10),
+                        bag = FALSE)
+
+model_nnet <- train(permeability ~., data = perm.train, method = 'avNNet',
+                    tuneGrid = nnetGrid, trControl = fit_control,
+                    preprocc = c('center','scale'),
+                    lineout = FALSE,
+                    trace = FALSE,
+                    MaxNWts = 10 * (ncol(perm.train) + 1) + 10 + 1,
+                    maxit = 500)
+
+residuos <- tibble(predito) %>%
+  mutate(
+    y = perm.test$permeability,
+    resd = y - predito
+  )
+
+ggplot(data = residuos, aes(x = predito, y = resd))+
+  geom_point()
+
+ggplot(data = residuos, aes(x = predito, y = y))+
+  geom_point()
+
+##Missing Data
+data("ChemicalManufacturingProcess")
+
+missmap(ChemicalManufacturingProcess)
+corr <- cor(ChemicalManufacturingProcess[,-1])
+corrplot(corr, method = 'number', type = 'upper')
+
+preprocc <- preProcess(ChemicalManufacturingProcess[,-1], method = 'bagImpute')
+preprocc
+
+chemical <- predict(preprocc, ChemicalManufacturingProcess[,-1])
+chemical$yield <- ChemicalManufacturingProcess$Yield
+
+##Exercícios Trees
+library(mlbench)
+library(rpart)
+library(rpart.plot)
+library(party)
+set.seed(2000)
+simulated <- mlbench.friedman1(200, sd = 1)
+simulated <- cbind(simulated$x, simulated$y)
+simulated <- as.data.frame(simulated)
+colnames(simulated)[ncol(simulated)] <- 'y'
+
+model1 <- randomForest(y ~ . , data = simulated,
+                       importance = TRUE,
+                       ntree = 1000)
+
+rfImp1 <- varImp(model1, scale = FALSE)
+rfImp1
+
+simulated$duplicate1 <- simulated$V1 + rnorm(200) + .1
+cor(simulated$duplicate1, simulated$V1)
+
+
+model_ctree <- ctree(y ~ . , data = simulated)
+
+model_rparty <- rpart(y ~ . , data = simulated)
+
+rpartyImp <- varImp(model_rparty, scale =  FALSE)
+rpartyImp
+rpart.plot(model_rparty)
+
+
+##rparty
+
+##Caret with rf
+trainControl <- trainControl(method = 'repeatedcv',
+                             number = 10,
+                             repeats = 3)
+
+
+tunegrid <- expand.grid(minsplit = 20,
+                        cp = 0.01)
+
+Model_rf <- train(y ~ .,
+                  data = simulated, method = 'rpart',
+                  tunegrid = tunegrid, trainControl = trainControl,
+                  importance = TRUE) 
+
+##Caret with rf
+trainControl <- trainControl(method = 'repeatedcv',
+                             number = 10,
+                             repeats = 3)
+
+##mtry = número de variávies (1/3 dos preditores)
+##ntrees = 1000      (500 a 1000) é o número de árvores
+tunegrid <- expand.grid(mtry = c(1:7),
+                        ntree = 1000)
+
+Model_rf <- train(y ~ .,
+                  data = simulated, method = 'rf',
+                  tunegrid = tunegrid, trainControl = trainControl,
+                  importance = TRUE) 
+
+rfImport <- varImp(Model_rf, scale = FALSE)
+rfImport
+plot(rfImport)
+plot(Model_rf)
+
+##Booste tree
+trainControl <- trainControl(method = 'repeatedcv',
+                             number = 10,
+                             repeats = 5)
+
+gmbGrid <- expand.grid(interation.depht = seq(1,7, by = 2),
+                       ntrees = seq(100, 1000, by = 50),
+                       shrinkage = c(0.01, 0.1))
+
+
+Model_gbm <- train(y ~ .,
+                   data = simulated, method = 'gbm',
+                   tunegrid = gbmGrid, trainControl = trainControl)
