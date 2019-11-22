@@ -1,0 +1,273 @@
+library(tidyverse)
+library(recipes)
+library(sjPlot)
+library(caret)
+library(doParallel)
+library(GGally)
+library(Boruta)
+
+data("okc")
+str(okc)
+
+##tratar fatores NA
+okc <- okc %>%
+  mutate_at(c('diet','location'), funs(ifelse(is.na(.),'indisponible',.)))
+
+
+rec <- recipe(Class ~ . , data = okc) %>%
+  step_other(all_nominal(), -all_outcomes(), threshold = 0.05, other = 'other values') %>%
+  step_holiday(date) %>%
+  step_dummy(all_nominal(), -all_outcomes()) %>%
+  prep()
+
+okc_treat <- bake(rec, okc)
+
+ok_treatX <- bake(rec, okc, composition = 'matrix', all_predictors(), -date)
+ok_treatY <- okc$Class
+
+model_01 <- glm(Class ~ age + diet + height + location, data = okc_treat,
+                family = 'binomial')
+summary(model_01)
+tab_model(model_01)
+
+
+############################################
+data("segmentationData")
+str(segmentationData)
+dim(segmentationData)
+
+seg_train <- segmentationData %>% filter(Case == 'Train') %>% select(-Case)
+seg_test <- segmentationData %>% filter(Case == 'Test') %>% select(-Case)
+
+rec <- recipe(Cell ~ . , data = seg_train) 
+
+rec <- rec %>%
+  step_YeoJohnson(all_numeric()) %>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_pca(all_numeric(), -all_outcomes())
+
+summary(rec)
+preparo <- prep(rec, seg_train, retain = TRUE)
+
+seg_train <- bake(preparo, seg_train, -Cell)
+seg_test <- bake(preparo, seg_test, -Cell)
+
+##Matrix interface
+seg_trainX <- bake(preparo, seg_train, -Cell, -Class, composition = 'matrix')
+seg_trainY <- seg_train$Class
+seg_testX <- bake(preparo, seg_test, -Cell, -Class, composition = 'matrix')
+seg_testY <- seg_test$Class
+
+
+## ggplot
+ggplot(seg_train, aes(PC1, PC2, color = Class))+
+  geom_point()
+
+
+##Caret
+set.seed(1234)
+control <- trainControl(
+  method = 'cv',
+  number = 10,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE)
+
+##SVM
+set.seed(1234)
+model_svm <- train(rec, 
+                   data = seg_train,
+                   method = "svmRadial",
+                   metric = 'ROC',
+                   tuneLenght = 10,
+                   trControl = control)
+
+predito <- predict(model_svm, seg_test)
+confusionMatrix(predito, seg_test$Class)
+
+
+##SVM with matrix
+set.seed(1234)
+model_svm <- train(x = seg_trainX, y = seg_trainY,
+                   method = "svmRadial",
+                   metric = 'ROC',
+                   tuneLenght = 10,
+                   trControl = control)
+
+predito <- predict(model_svm, seg_testX)
+confusionMatrix(predito, seg_testY)
+
+
+
+##gbm with matrix
+set.seed(1234)
+model_lgbm <- train(x = seg_trainX, y = seg_trainY,
+                   method = "gbm",
+                   metric = 'ROC',
+                   trControl = control)
+
+model_lgbm
+predito <- predict(model_lgbm, seg_testX)
+confusionMatrix(predito, seg_testY)
+
+
+##nnet with matrix
+set.seed(1234)
+model_net <- train(x = seg_trainX, y = seg_trainY,
+                    method = "nnet",
+                    metric = 'ROC',
+                    trControl = control)
+
+predito <- predict(model_net, seg_testX)
+confusionMatrix(predito, seg_testY)
+
+
+################data Credit_data #############################33
+data("credit_data")
+str(credit_data)
+summary(credit_data)
+
+
+##Substitui factores na
+credit <- credit_data %>%
+  mutate(Home = as.character(Home),
+         Marital = as.character(Marital),
+         Job = as.character(Job)) %>%
+  mutate(Home = ifelse(is.na(Home),'indisponible',Home),
+         Marital = ifelse(is.na(Marital),'indisponible',Marital),
+         Job = ifelse(is.na(Job),'indisponible',Job) )
+
+##Some plots
+ggplot(credit, aes(Expenses, fill = Status))+
+  geom_histogram()
+
+ggplot(credit, aes(Status, log(Income), fill = Status))+
+  geom_boxplot()
+
+ggplot(credit, aes(Status, log(Seniority), fill = Status))+
+  geom_boxplot()
+
+ggplot(credit, aes(Status, Age, fill = Status))+
+  geom_boxplot()
+
+##intereção das princiapis variaveis
+# Income, Seniority, Amount, Price, Age by Status
+
+ggpairs(credit[c('Income','Seniority','Amount','Price','Age','Status')], aes(color = Status))
+
+##Separaret File
+index <- createDataPartition(credit$Status, p = 0.75, list = FALSE)
+credit_train <- credit[index, ]
+credit_test <- credit[-index, ]
+
+#recipe
+rec <- recipe(Status ~ . , data = credit_train) %>%
+  step_YeoJohnson(all_numeric()) %>%
+  step_center(all_numeric()) %>%
+  step_scale(all_numeric()) %>%
+  step_medianimpute(all_numeric()) %>%
+  step_corr(all_numeric(), threshold = 0.9) %>%
+  step_other(-all_numeric(), -all_outcomes(), threshold = 0.05, other = 'other level') %>%
+  step_dummy(-all_numeric(), -all_outcomes()) %>%
+  step_nzv(all_predictors())
+
+preparo <- prep(rec, credit_train, retain = TRUE)
+
+credit_trainX <- bake(preparo, credit_train, -all_outcomes(), composition = 'matrix')
+credit_trainY <- credit_train$Status
+credit_testX <- bake(preparo, credit_test, -all_outcomes(), composition = 'matrix')
+credit_testY <- credit_test$Status
+
+
+##Boruta
+feature <- Boruta(x = credit_trainX, y = credit_trainY, doTrace = 2)
+plot(feature)
+feature$finalDecision
+getConfirmedFormula(feature)
+
+## DoParalell
+cl <- makePSOCKcluster(5)
+registerDoParallel(cl)
+
+##Visualização
+rec2 <- rec %>%
+  step_kpca(all_predictors()) %>%
+  prep()
+
+credit_pca_train <- bake(rec2, credit_train)
+ggplot(credit_pca_train, aes(kPC1, kPC2, color = Status))+
+  geom_point()
+
+##Caret
+set.seed(1234)
+control <- trainControl(
+  method = 'cv',
+  number = 10,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE)
+
+##SVM
+set.seed(1234)
+model_svm <- train(x = credit_trainX,
+                   y = credit_trainY,
+                   method = "svmRadial",
+                   metric = 'ROC',
+                   tuneLenght = 10,
+                   trControl = control)
+
+model_svm
+plot(varImp(model_svm))
+predito <- predict(model_svm, credit_testX)
+confusionMatrix(predito, credit_testY)
+
+##Rf
+set.seed(1234)
+model_rf <- train(x = credit_trainX,
+                   y = credit_trainY,
+                   method = "rf",
+                   metric = 'ROC',
+                   tuneLenght = 10,
+                   trControl = control)
+
+model_rf
+plot(varImp(model_rf))
+predito <- predict(model_rf, credit_testX)
+confusionMatrix(predito, credit_testY)
+
+
+##gbm 
+set.seed(1234)
+model_gbm <- train(x = credit_trainX,
+                  y = credit_trainY,
+                  method = "gbm",
+                  metric = 'ROC',
+                  trControl = control)
+
+model_gbm
+plot(varImp(model_gbm))
+predito <- predict(model_gbm, credit_testX)
+confusionMatrix(predito, credit_testY)
+
+##H20
+library(h2o)
+h2o.init()
+
+h2o_train <- bake(preparo, credit_train)
+h2o_test <- bake(preparo, credit_test)
+
+h2o_train <- as.h2o(h2o_train)
+h2o_test <- as.h2o(h2o_test)
+
+# Model GBM
+credit.gbm <- h2o.gbm(x = 2:18, y = 1, training_frame = h2o_train, ntrees = 10,
+                   max_depth = 4, min_rows = 2, learn_rate = 0.2,
+                   nfolds = 10)
+
+h2o.performance(credit.gbm, h2o_test)
+
+
+# Model Rf
+credit.rf <- h2o.randomForest(x = 2:18, y = 1, training_frame = h2o_train,
+                           nfolds = 10)
+
+h2o.performance(credit.rf, h2o_test)
