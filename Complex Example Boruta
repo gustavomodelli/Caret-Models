@@ -1,0 +1,355 @@
+library(tidyverse)
+library(corrplot)
+library(caret)
+library(doSNOW)
+library(pROC)
+library(e1071)
+library(Boruta)
+
+over <- read.csv('train_over.csv', dec = '.')
+str(over)
+dim(over)
+over$target <- factor(over$target, levels = c('0','1'), labels = c('X0','X1'))
+prop.table(table(over$target))
+##Remove Id and Target
+over_n <- over[,-c(1,2)]
+
+##Remove id
+over <- over[,-1]
+
+##Check correlated predictors
+corr <- cor(over_n)
+findcorr <- findCorrelation(corr, 0.8) ##R more than 0.8
+findcorr
+
+##There are no hight correlated predictors
+
+#Check non-zero variance
+nzv <- preProcess(over_n, method = 'nzv')
+nzv
+##There are no non-zero variance predictors
+
+##Check skewness
+skew <- sapply(over_n, skewness)
+tibble(skew) %>%
+  filter(skew > 0.3 | skew < -0.3)
+
+##The data are relative normal distributed
+
+##Reduce variables with PCA
+preproc <- preProcess(over_n, method = c('center','scale','YeoJohnson','pca'))
+over.pca <- predict(preproc, over_n)
+head(over.pca[,1:5])
+
+##Find Linear Combos
+combo <- findLinearCombos(over_n)
+combo
+##Remove liner Combos
+over_n <- over_n[,-combo$remove]
+dim(over_n)
+##Its was removed 50 variables
+##Add target
+over_n$target <- over$target
+over_n$target <- factor(over_n$target, levels = c('0','1'), labels = c('X0','X1'))
+
+##Check frist 10 variables
+plot <- over_n[,c(1:10,251)]
+featurePlot(plot[1:10],plot$target, plot = 'box')
+
+##Recursive feature elimination
+set.seed(123)
+ctrl <- rfeControl(functions = rfFuncs,
+                   method = "repeatedcv",
+                   repeats = 5,
+                   verbose = FALSE)
+
+rfProfile <- rfe(over_n[,-251], over_n$target,
+                 rfeControl = ctrl)
+
+predictor <- predictors(rfProfile)
+plot(rfProfile)
+rfProfile
+
+##RFE with glmnet
+##Recursive feature elimination
+set.seed(123)
+ctrl <- rfeControl(functions = caretFuncs,
+                   method = "repeatedcv",
+                   repeats = 5,
+                   verbose = FALSE)
+
+rfProfile <- rfe(over_n[,-251], over_n$target,
+                 sizes = seq(15,22,by=1),
+                 metric = "Accuracy",
+                 maximize=TRUE,
+                 rfeControl = ctrl,
+                 method='glmnet')
+
+predictor <- predictors(rfProfile)
+rfProfile$optVariables
+
+##Selecting variables with boruta
+boruta <- Boruta(over_n[,-251], over_n$target, doTrace = 2)
+var_boruta <- names(boruta$finalDecision[boruta$finalDecision == 'Confirmed'])
+
+##Varivaies confirmadas ambas analises
+vars_final = unique(c(predictor, var_boruta))
+
+##Best Predictors are: predictor
+##New sample with best predictors
+over_rfe <- over_n[,predictor]
+over_rfe$target <- over_n$target
+  dim(over_rfe)
+
+
+##Plot Variable selection
+featurePlot(over_rfe[,-17], over_rfe$target, plot = 'density')
+
+##Plot with tranformed variables
+proce <- preProcess(over_rfe[,-17], method = c('center','scale','YeoJohnson',
+                                               'spatialSign'))
+over_plot <- predict(proce, over_rfe[,-17])
+featurePlot(over_plot, over_rfe$target, plot = 'density')
+
+##DataPartition
+index <- createDataPartition(over_rfe$target, p = 0.80, list = FALSE)
+train.over <- over_rfe[index,]
+test.over <- over_rfe[-index,]
+
+##Relative to small sample size we can train the model in all avaiable data 
+## New Train 
+train.over <- over_rfe
+
+##Predict Function
+confusion <- function(x){
+  pred <- predict(x, test.over)
+  confusionMatrix(pred, test.over$target)
+}
+
+ROC <- function(x){
+  pred <- predict(x, test.over, type = 'prob')
+  roc(test.over$target, pred[,2])
+}
+
+set.seed(123)
+fit_control <- trainControl(## 10-fold CV
+  method = "cv",
+  number = 10,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  allowParallel = TRUE)
+
+
+##Paralelal process
+cl <- makeCluster(3, type = 'SOCK')
+registerDoSNOW(cl)
+
+##GLM
+set.seed(123)
+Model_glm <- train(target ~ . , data = train.over,
+                  method = "glmStepAIC", family = 'binomial',
+                  metric = 'ROC',
+                  trControl = fit_control,
+                  preProc = c('center','scale','YeoJohnson','spatialSign'))
+
+Model_glm$finalModel
+plot(Model_glm$finalModel)
+ROC(Model_glm)
+
+##Residuals x Predictors
+preditoGLM <- predict(Model_glm, train.over, type = 'prob')
+residuo <- residuals(Model_glm$finalModel)
+ggplot(data = preditoGLM, aes(x = residuo, y = X1))+
+  geom_point()
+
+##GAM
+set.seed(123)
+Model_gam <- train(target ~ . , data = train.over,
+                   method = "gam", family = 'binomial',
+                   metric = 'ROC',
+                   trControl = fit_control,
+                   preProc = c('center','scale','YeoJohnson'))
+
+##GAM
+set.seed(123)
+Model_gam <- train(target ~ . , data = train.over,
+                   method = "gam", family = 'binomial',
+                   metric = 'ROC',
+                   trControl = fit_control,
+                   preProc = c('center','scale','YeoJohnson'))
+
+##SVM Radial
+set.seed(123)
+grid <- expand.grid(C = seq(0.125, 1, by=0.125),
+                    sigma = seq(0.01, 0.05, by=0.01))
+
+Model_radial <- train(target ~ . , data = train.over,
+                   method = "svmRadial", 
+                   metric = 'ROC',
+                   trControl = fit_control,
+                   tuneGrid = grid,
+                   preProc = c('center','scale','YeoJohnson'))
+Model_radial
+ROC(Model_radial)
+
+##SVM Class Weight
+set.seed(123)
+svmLW_grid<-expand.grid(cost=seq(0,1,by=.1),weight=seq(0,1,by=.1))
+
+Model_svm <- train(target ~ . , data = train.over,
+                      method = "svmLinearWeights", 
+                      metric = 'ROC',
+                      trControl = fit_control,
+                      tuneGrid = svmLW_grid,
+                      preProc = c('center','scale','YeoJohnson'))
+
+Model_svm
+
+##Radial Weights
+##SVM Class Weight
+set.seed(123)
+grid_svm <- expand.grid(C = seq(0.25, 1, by = 0.125),
+                        sigma = seq(0.01, 0.05, by = 0.05),
+                        Weight = seq(1,3, by=1))
+
+Model_svmR <- train(target ~ . , data = train.over,
+                   method = "svmRadialWeights", 
+                   metric = 'ROC',
+                   trControl = fit_control,
+                   tuneGrid = grid_svm,
+                   preProc = c('center','scale','YeoJohnson'))
+
+
+##Rando Forest
+set.seed(123)
+Model_rf <- train(target ~ . , data = train.over,
+                    method = "rf",
+                    tuneLength = 10,
+                    ntrees = 1000,
+                    importance = TRUE,
+                    metric = 'ROC',
+                    trControl = fit_control)
+Model_rf
+confusion(Model_rf)
+ROC(Model_rf)
+
+
+##Model Lasso
+set.seed(123)
+x <- model.matrix(target ~ ., data = train.over)
+y <- train.over$target
+
+tunegrid <- expand.grid(alpha = 1, lambda = seq(0.001,0.1,by = 0.0005))
+Model_lasso <- train(x, y,
+                  method = "glmnet",
+                  metric = 'ROC',
+                  trControl = fit_control,
+                  tuneGrid = tunegrid)
+
+ROC(Model_lasso)
+teste <- model.matrix(~ . , data = test.over)
+predito_lasso <- predict(Model_lasso, teste, type = 'prob')
+roc(test.over$target, predito_lasso$X1)
+
+##Model XGB Tree
+Model_xgbTree <- train(target ~ . , data = train.over, method = 'xgbTree',
+                       trControl = fit_control,
+                       metric = 'ROC',
+                       preProcess = c('center','scale','YeoJohnson'))
+
+ROC(Model_xgbTree)
+
+##NNet
+nnetGrid <- expand.grid(decay = c(0.001, .01, .1),
+                        size = seq(1, 27, by = 2),
+                        bag = FALSE)
+
+Model_nnet <- train(target ~ . , data = train.over, method = 'avNNet',
+                    trControl = fit_control, tuneGrid = nnetGrid,
+                    metric = 'ROC',
+                    preProcess = c('center','scale','YeoJohnson'))
+ROC(Model_nnet)
+
+ressamples <- resamples(list('glm' = Model_glm,
+                             'SVM' = Model_radial,
+                             'SVM linear' = Model_svm,
+                             'SVM Radial' = Model_svmR,
+                             'Random Forest' = Model_rf,
+                             'lasso' = Model_lasso,
+                             'xgbTree' = Model_xgbTree,
+                             'NNet' = Model_nnet))
+
+
+summary(ressamples)
+parallelplot(ressamples)
+bwplot(ressamples)
+##Stop Paralelal Process
+stopCluster(cl)
+
+##Predict
+test <- read.csv('test.csv', dec = '.')
+str(test)
+
+predicao <- predict(Model_Stack, test, type = 'prob')
+
+##Predicao para Lasso
+teste <- model.matrix(~ . , data = test)
+predito_lasso <- predict(Model_lasso, teste, type = 'prob')
+
+
+submitt <- test %>%
+  select(id) %>%
+  mutate(target = predicao[,'X1'])
+
+##submitt$target <- as.numeric(submitt$target)
+write.csv(submitt, file = 'submit.csv', row.names = FALSE)
+
+##Caret Essemble
+##CaretEsemble
+library(caretEnsemble)
+set.seed(123)
+fit_control <- trainControl(## 10-fold CV
+  method = "cv",
+  number = 10,
+  summaryFunction = twoClassSummary,
+  classProbs = TRUE,
+  allowParallel = TRUE)
+
+
+Model_list <- caretList(
+  target ~ . , data = train.over,
+  trControl= fit_control,
+  metric="ROC",
+  #methodList=c("glm", "svmRadial"),#
+  tuneList=list(
+    svmRadial=caretModelSpec(method="svmRadial", tuneGrid=expand.grid(C = seq(0.125, 1, by=0.125),
+                                                                      sigma = seq(0.01, 0.05, by=0.01)),
+                             preProcess= c('center','scale','YeoJohnson')),
+    glm = caretModelSpec(method = 'glm', preProcess = c('center','scale','YeoJohnson'))
+    )
+)
+
+##Essemble
+Model_essemble <- caretEnsemble(
+  Model_list, 
+  metric="ROC",
+  trControl=trainControl(
+    number=2,
+    summaryFunction=twoClassSummary,
+    classProbs=TRUE
+  ))
+
+##Model Stack
+Model_Stack <- caretStack(
+  Model_list,
+  method="glm",
+  metric="ROC",
+  trControl=trainControl(
+    method="boot",
+    number=10,
+    savePredictions="final",
+    classProbs=TRUE,
+    summaryFunction=twoClassSummary
+  )
+)
+
